@@ -25,9 +25,29 @@ def _load_env():
 _load_env()
 
 
+def _dsn():
+    """DATABASE_URL, cleaned of stray whitespace/newlines/quotes from copy-paste."""
+    return os.environ["DATABASE_URL"].strip().strip('"').strip("'").strip()
+
+
+def _connect():
+    dsn = _dsn()
+    try:
+        return psycopg2.connect(dsn)
+    except psycopg2.OperationalError as e:
+        # Some libpq builds reject channel_binding; retry without it (sslmode=require still encrypts).
+        if "channel_binding" in str(e) and "channel_binding" in dsn:
+            import re
+            dsn = re.sub(r"[&?]channel_binding=[^&]*", "", dsn)
+            if "?" not in dsn and "&" in dsn:
+                dsn = dsn.replace("&", "?", 1)
+            return psycopg2.connect(dsn)
+        raise
+
+
 @contextmanager
 def _cursor():
-    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    conn = _connect()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             yield cur
