@@ -1,6 +1,8 @@
 """Database layer: all reads/writes to Neon go through here."""
 import os
 import pathlib
+import re
+import sys
 from contextlib import contextmanager
 from datetime import date, timedelta
 
@@ -26,22 +28,32 @@ _load_env()
 
 
 def _dsn():
-    """DATABASE_URL, cleaned of stray whitespace/newlines/quotes from copy-paste."""
-    return os.environ["DATABASE_URL"].strip().strip('"').strip("'").strip()
+    """DATABASE_URL cleaned of copy-paste noise: whitespace, newlines, quotes, a leading `psql '`."""
+    raw = os.environ["DATABASE_URL"]
+    i = raw.find("postgres")
+    dsn = raw[i:] if i >= 0 else raw
+    return dsn.strip().strip("'\"").strip()
+
+
+def _without_channel_binding(dsn):
+    dsn = re.sub(r"[&?]channel_binding=[^&]*", "", dsn)
+    if "?" not in dsn and "&" in dsn:
+        dsn = dsn.replace("&", "?", 1)
+    return dsn
+
+
+def _mask(msg):
+    return re.sub(r"://[^@\s]+@", "://***@", str(msg))
 
 
 def _connect():
     dsn = _dsn()
     try:
         return psycopg2.connect(dsn)
-    except psycopg2.OperationalError as e:
-        # Some libpq builds reject channel_binding; retry without it (sslmode=require still encrypts).
-        if "channel_binding" in str(e) and "channel_binding" in dsn:
-            import re
-            dsn = re.sub(r"[&?]channel_binding=[^&]*", "", dsn)
-            if "?" not in dsn and "&" in dsn:
-                dsn = dsn.replace("&", "?", 1)
-            return psycopg2.connect(dsn)
+    except psycopg2.Error as e:  # ProgrammingError = bad DSN, OperationalError = network/auth
+        print(f"[db] connect failed ({type(e).__name__}): {_mask(e)}", file=sys.stderr, flush=True)
+        if "channel_binding" in dsn:
+            return psycopg2.connect(_without_channel_binding(dsn))
         raise
 
 

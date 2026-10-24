@@ -4,7 +4,9 @@ Run locally:  python3 server.py   ->  http://localhost:8000/mcp
 Auth: every request needs the MCP_TOKEN from .env, either as
       header  Authorization: Bearer <token>   or   query  ?key=<token>
 """
+import logging
 import os
+import re
 import secrets
 from typing import Optional
 
@@ -78,6 +80,13 @@ class TokenAuth:
         self.app, self.token = app, token
 
     async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and ".well-known" in scope.get("path", ""):
+            # OAuth discovery probes from clients: we don't use OAuth, so say "not here" (404),
+            # not 401, which would make clients think they must log in.
+            await send({"type": "http.response.start", "status": 404,
+                        "headers": [(b"content-type", b"text/plain")]})
+            await send({"type": "http.response.body", "body": b"not found"})
+            return
         if scope["type"] == "http":
             headers = dict(scope.get("headers") or [])
             auth = headers.get(b"authorization", b"").decode()
@@ -94,11 +103,22 @@ class TokenAuth:
         await self.app(scope, receive, send)
 
 
+class _HideKey(logging.Filter):
+    """Never write the ?key=<token> secret into the access logs."""
+
+    def filter(self, record):
+        if record.args:
+            record.args = tuple(re.sub(r"key=[^&\s\"]+", "key=***", a) if isinstance(a, str) else a
+                                for a in record.args)
+        return True
+
+
 def main():
     token = os.environ.get("MCP_TOKEN")
     if not token:
         raise SystemExit("MCP_TOKEN is not set in .env")
     app = TokenAuth(mcp.streamable_http_app(), token)
+    logging.getLogger("uvicorn.access").addFilter(_HideKey())
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
 
 
